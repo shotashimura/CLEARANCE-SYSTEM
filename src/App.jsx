@@ -6,6 +6,7 @@ import {
   CARE_PROMPT,
   ORCHESTRATOR_PROMPT,
 } from "./prompts/index.js";
+import { INDIVIDUALS, translateJudgment } from "./lib/translateJudgment.js";
 
 const API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
 
@@ -607,6 +608,85 @@ export default function App() {
                 RISK_SCORE: WITHHELD
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Translation Engine — verdict → 5個体の動きパラメータ (OSC) */}
+      {verdict && (
+        <div style={{ marginTop: 20 }}>
+          <div
+            style={{
+              color: "#888",
+              fontSize: 10,
+              letterSpacing: 3,
+              marginBottom: 10,
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
+            <span>OUTBOUND TELEMETRY — OSC PARAMETERS</span>
+            <span style={{ color: "#444", fontSize: 9 }}>
+              [M5Stack receiver offline · log preview only]
+            </span>
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(5, 1fr)",
+              gap: 8,
+            }}
+          >
+            {INDIVIDUALS.map((ind) => {
+              const t = translateJudgment(verdict, ind);
+              return (
+                <div
+                  key={ind.id}
+                  style={{
+                    border: "1px solid #222",
+                    background: "#0a0a0a",
+                    padding: "10px 12px",
+                    fontFamily: "monospace",
+                  }}
+                >
+                  <div
+                    style={{
+                      color: "#fff",
+                      fontSize: 12,
+                      letterSpacing: 2,
+                      marginBottom: 2,
+                    }}
+                  >
+                    #{ind.id} {ind.label}
+                  </div>
+                  <div
+                    style={{
+                      color: "#555",
+                      fontSize: 9,
+                      marginBottom: 8,
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    {ind.contents}
+                    <br />
+                    base {ind.base_speed.toFixed(1)}× · {ind.behavior_lean}
+                  </div>
+                  <pre
+                    style={{
+                      color: "#7fa",
+                      fontSize: 10,
+                      margin: 0,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    {t.oscLines.join("\n")}
+                  </pre>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
