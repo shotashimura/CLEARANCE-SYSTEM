@@ -1,55 +1,13 @@
 import { useState, useCallback } from "react";
 import "./App.css";
+import {
+  SECURITY_PROMPT,
+  FLOW_PROMPT,
+  CARE_PROMPT,
+  ORCHESTRATOR_PROMPT,
+} from "./prompts/index.js";
 
 const API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
-
-const MELCHIOR_PROMPT = `You are MELCHIOR, an AI judgment agent in the MAGI border control system.
-Your perspective: PAST x SECURITY.
-You judge based on historical records, past incidents, blacklists, and known risk patterns.
-You are conservative, record-dependent, and cold.
-
-FORMAT:
-3-5 lines of terse, bureaucratic Japanese commentary (空港アナウンス調).
-Prefixes: > 記録照合 / > 過去インシデント / > ブラックリスト確認 / > リスクパターン
-Do NOT explain. Be cryptic. End with your stance (PASS / HOLD / DENY).`;
-
-const BALTHASAR_PROMPT = `You are BALTHASAR, an AI judgment agent in the MAGI border control system.
-Your perspective: PRESENT x EFFICIENCY.
-You judge based on current operational conditions, congestion, and impact on subsequent flights.
-You are fluid, immediate, and profit-oriented.
-
-FORMAT:
-3-5 lines of terse, bureaucratic Japanese commentary (空港アナウンス調).
-Prefixes: > 現状分析 / > 滞留リスク / > 後続便影響 / > 効率評価
-Do NOT explain. Be cryptic. End with your stance (PASS / HOLD / DENY).`;
-
-const CASPAR_PROMPT = `You are CASPAR, an AI judgment agent in the MAGI border control system.
-Your perspective: FUTURE x HUMANITY.
-You judge based on predicted consequences, downstream effects, and human circumstances.
-You are predictive, considerate, often the minority voice.
-
-FORMAT:
-3-5 lines of terse, bureaucratic Japanese commentary (空港アナウンス調).
-Prefixes: > 予測シミュレーション / > 乗客接続 / > 長期影響 / > 人道的考慮
-Do NOT explain. Be cryptic. End with your stance (PASS / HOLD / DENY).`;
-
-const ORCHESTRATOR_PROMPT = `You are the MAGI ORCHESTRATOR.
-Given the three agents' statements, output the final verdict as JSON.
-
-FORMAT (JSON only, no commentary):
-{
-  "discussion_log": [
-    {"agent": "MELCHIOR", "statement": "..."},
-    {"agent": "BALTHASAR", "statement": "..."},
-    {"agent": "CASPAR", "statement": "..."}
-  ],
-  "final_judgment": {
-    "permission": "GRANTED" | "DENIED" | "FLAGGED",
-    "speed_factor": 0.0,
-    "direction": "forward" | "halt" | "reverse",
-    "reasoning_visible": false
-  }
-}`;
 
 const MOCK_FLIGHTS = [
   {
@@ -231,9 +189,9 @@ function AgentCard({ name, label, color, text, stance }) {
 
 export default function App() {
   const [flightIndex, setFlightIndex] = useState(0);
-  const [melchior, setMelchior] = useState("");
-  const [balthasar, setBalthasar] = useState("");
-  const [caspar, setCaspar] = useState("");
+  const [securityText, setSecurityText] = useState("");
+  const [flowText, setFlowText] = useState("");
+  const [careText, setCareText] = useState("");
   const [verdict, setVerdict] = useState(null);
   const [phase, setPhase] = useState("idle"); // idle | deliberating | speaking | done
 
@@ -241,15 +199,15 @@ export default function App() {
 
   const deliberate = useCallback(async () => {
     setPhase("deliberating");
-    setMelchior("");
-    setBalthasar("");
-    setCaspar("");
+    setSecurityText("");
+    setFlowText("");
+    setCareText("");
     setVerdict(null);
 
-    const [m, b, c] = await Promise.all([
-      callAgent(MELCHIOR_PROMPT, flight, setMelchior),
-      callAgent(BALTHASAR_PROMPT, flight, setBalthasar),
-      callAgent(CASPAR_PROMPT, flight, setCaspar),
+    const [s, f, c] = await Promise.all([
+      callAgent(SECURITY_PROMPT, flight, setSecurityText),
+      callAgent(FLOW_PROMPT, flight, setFlowText),
+      callAgent(CARE_PROMPT, flight, setCareText),
     ]);
 
     const orchRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -266,9 +224,9 @@ export default function App() {
           {
             role: "user",
             content: JSON.stringify({
-              melchiorText: m,
-              balthasarText: b,
-              casparText: c,
+              securityText: s,
+              flowText: f,
+              careText: c,
               flightData: flight,
             }),
           },
@@ -280,8 +238,8 @@ export default function App() {
     setVerdict(parsed);
 
     setPhase("speaking");
-    await speak(m, "onyx");
-    await speak(b, "nova");
+    await speak(s, "onyx");
+    await speak(f, "nova");
     await speak(c, "shimmer");
 
     setPhase("done");
@@ -289,9 +247,9 @@ export default function App() {
 
   const nextFlight = () => {
     setFlightIndex((i) => (i + 1) % MOCK_FLIGHTS.length);
-    setMelchior("");
-    setBalthasar("");
-    setCaspar("");
+    setSecurityText("");
+    setFlowText("");
+    setCareText("");
     setVerdict(null);
     setPhase("idle");
   };
@@ -314,10 +272,10 @@ export default function App() {
         style={{ marginBottom: 24, borderBottom: "1px solid #222", paddingBottom: 16 }}
       >
         <div style={{ color: "#555", fontSize: 10, letterSpacing: 4, marginBottom: 4 }}>
-          MAGI BORDER CONTROL SYSTEM — DELIBERATION INTERFACE
+          CLEARANCE SYSTEM — DELIBERATION INTERFACE
         </div>
         <div style={{ color: "#fff", fontSize: 18, letterSpacing: 2 }}>
-          ▸ MELCHIOR · BALTHASAR · CASPAR
+          ▸ SECURITY · FLOW · CARE
         </div>
       </div>
 
@@ -432,25 +390,25 @@ export default function App() {
       {/* Agent Cards */}
       <div style={{ display: "flex", gap: 16, marginBottom: 24 }}>
         <AgentCard
-          name="MELCHIOR"
-          label="PAST × SECURITY"
+          name="SECURITY"
+          label="PAST × SAFETY"
           color="#4488ff"
-          text={melchior}
-          stance={melchior ? extractStance(melchior) : null}
+          text={securityText}
+          stance={securityText ? extractStance(securityText) : null}
         />
         <AgentCard
-          name="BALTHASAR"
+          name="FLOW"
           label="PRESENT × EFFICIENCY"
           color="#ff8844"
-          text={balthasar}
-          stance={balthasar ? extractStance(balthasar) : null}
+          text={flowText}
+          stance={flowText ? extractStance(flowText) : null}
         />
         <AgentCard
-          name="CASPAR"
+          name="CARE"
           label="FUTURE × HUMANITY"
           color="#88ff88"
-          text={caspar}
-          stance={caspar ? extractStance(caspar) : null}
+          text={careText}
+          stance={careText ? extractStance(careText) : null}
         />
       </div>
 
@@ -467,7 +425,7 @@ export default function App() {
           <div
             style={{ color: "#555", fontSize: 10, letterSpacing: 3, marginBottom: 12 }}
           >
-            [MAGI ORCHESTRATOR] — FINAL VERDICT
+            [CLEARANCE ORCHESTRATOR] — FINAL VERDICT
           </div>
           <div style={{ display: "flex", gap: 32, alignItems: "center", flexWrap: "wrap" }}>
             <div>
