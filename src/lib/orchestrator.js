@@ -9,9 +9,15 @@ import {
   CARE_PROMPT,
   ORCHESTRATOR_PROMPT,
 } from "../prompts/index.js";
+import { detectLanguage, languageInstruction } from "./lang.js";
 
 const API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+
+function withLanguage(basePrompt, lang) {
+  if (!lang) return basePrompt;
+  return `${basePrompt}\n\n--- LANGUAGE DIRECTIVE ---\n${languageInstruction(lang)}`;
+}
 
 async function parseStream(response, onChunk) {
   const reader = response.body.getReader();
@@ -88,13 +94,20 @@ export async function callOrchestrator(securityText, flowText, careText, flightD
 
 /**
  * 1便分の合議。3エージェント並列 → オーケストレーター集約。
+ * language: ISO code ("ja", "en", "de", "ar", ...)。
+ *   未指定の場合は flight.origin から自動推定。
  * onAgent: (agentName, fullText) => void
  */
-export async function deliberateOne(flight, { onAgent } = {}) {
+export async function deliberateOne(flight, { onAgent, language } = {}) {
+  const lang = language ?? detectLanguage(flight?.origin);
+  const sysSecurity = withLanguage(SECURITY_PROMPT, lang);
+  const sysFlow = withLanguage(FLOW_PROMPT, lang);
+  const sysCare = withLanguage(CARE_PROMPT, lang);
+
   const [s, f, c] = await Promise.all([
-    callAgent(SECURITY_PROMPT, flight, (t) => onAgent?.("SECURITY", t)),
-    callAgent(FLOW_PROMPT, flight, (t) => onAgent?.("FLOW", t)),
-    callAgent(CARE_PROMPT, flight, (t) => onAgent?.("CARE", t)),
+    callAgent(sysSecurity, flight, (t) => onAgent?.("SECURITY", t)),
+    callAgent(sysFlow, flight, (t) => onAgent?.("FLOW", t)),
+    callAgent(sysCare, flight, (t) => onAgent?.("CARE", t)),
   ]);
   const verdict = await callOrchestrator(s, f, c, flight);
   return {
@@ -102,11 +115,13 @@ export async function deliberateOne(flight, { onAgent } = {}) {
     flowText: f,
     careText: c,
     verdict,
+    language: lang,
   };
 }
 
 /**
  * 5便を並列に判定する。flights.length 回 deliberateOne を Promise.all で実行。
+ * 各便は出発地に応じた言語で議論される。
  * onPairResult: (index, result) => void  — 完了した便から順次UI更新できる。
  */
 export async function runCycle(flights, { onPairResult } = {}) {

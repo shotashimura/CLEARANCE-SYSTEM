@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { INDIVIDUALS, translateJudgment } from "../lib/translateJudgment.js";
 import { fetchFiveFlights, MOCK_FLIGHTS } from "../lib/flights.js";
 import { runCycle, deliberateOne } from "../lib/orchestrator.js";
+import { detectLanguage, languageMeta, isRTL } from "../lib/lang.js";
 
 const PERMISSION_COLOR = {
   GRANTED: "#00ff88",
@@ -52,6 +53,7 @@ function DiscussionPanel({ result }) {
       </div>
     );
   }
+  const rtl = isRTL(result.language);
   const items = [
     { name: "SECURITY", label: "PAST × SAFETY", text: result.securityText },
     { name: "FLOW", label: "PRESENT × EFFICIENCY", text: result.flowText },
@@ -82,6 +84,7 @@ function DiscussionPanel({ result }) {
               {it.label}
             </div>
             <pre
+              dir={rtl ? "rtl" : "ltr"}
               style={{
                 color: "#bbb",
                 fontSize: 11,
@@ -89,6 +92,7 @@ function DiscussionPanel({ result }) {
                 wordBreak: "break-word",
                 margin: 0,
                 lineHeight: 1.6,
+                textAlign: rtl ? "right" : "left",
               }}
             >
               {it.text || "— 待機中 —"}
@@ -166,6 +170,8 @@ function SuitcaseRow({ individual, flight, result, expanded, onToggle }) {
   const permission = fj?.permission;
   const speed = fj?.speed_factor;
   const behavior = fj?.behavior_modifier;
+  const lang = result?.language ?? (flight ? detectLanguage(flight.origin) : null);
+  const langInfo = lang ? languageMeta(lang) : null;
   return (
     <div
       style={{
@@ -177,7 +183,7 @@ function SuitcaseRow({ individual, flight, result, expanded, onToggle }) {
         onClick={onToggle}
         style={{
           display: "grid",
-          gridTemplateColumns: "60px 1fr 120px 180px 100px 110px 60px",
+          gridTemplateColumns: "60px 1fr 120px 70px 170px 90px 110px 50px",
           alignItems: "center",
           padding: "10px 16px",
           cursor: "pointer",
@@ -196,6 +202,18 @@ function SuitcaseRow({ individual, flight, result, expanded, onToggle }) {
               <div style={{ color: "#555", fontSize: 10 }}>
                 {flight.origin} → {flight.destination}
               </div>
+            </>
+          ) : (
+            <span style={{ color: "#333" }}>—</span>
+          )}
+        </div>
+        <div>
+          {langInfo ? (
+            <>
+              <div style={{ color: "#aaa", fontSize: 11, letterSpacing: 2 }}>
+                {langInfo.displayCode}
+              </div>
+              <div style={{ color: "#555", fontSize: 10 }}>{langInfo.native}</div>
             </>
           ) : (
             <span style={{ color: "#333" }}>—</span>
@@ -423,7 +441,7 @@ export default function CycleView() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "60px 1fr 120px 180px 100px 110px 60px",
+            gridTemplateColumns: "60px 1fr 120px 70px 170px 90px 110px 50px",
             padding: "8px 16px",
             color: "#555",
             fontSize: 10,
@@ -434,6 +452,7 @@ export default function CycleView() {
           <div>SUITCASE</div>
           <div>CONTENTS</div>
           <div>FLIGHT</div>
+          <div>LANG</div>
           <div>PERMISSION</div>
           <div>SPEED</div>
           <div>BEHAVIOR</div>

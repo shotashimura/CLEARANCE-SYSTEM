@@ -1,7 +1,13 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { MOCK_FLIGHTS } from "../lib/flights.js";
 import { INDIVIDUALS, translateJudgment } from "../lib/translateJudgment.js";
 import { deliberateOne } from "../lib/orchestrator.js";
+import {
+  detectLanguage,
+  LANG_META,
+  languageMeta,
+  isRTL,
+} from "../lib/lang.js";
 
 const API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
 
@@ -48,7 +54,8 @@ function extractStance(text) {
   return match ? match[1] : null;
 }
 
-function AgentCard({ name, label, color, text, stance }) {
+function AgentCard({ name, label, color, text, stance, lang }) {
+  const rtl = isRTL(lang);
   return (
     <div
       style={{
@@ -66,6 +73,7 @@ function AgentCard({ name, label, color, text, stance }) {
       </div>
       <div style={{ color: "#888", fontSize: 10, marginBottom: 12 }}>{label}</div>
       <pre
+        dir={rtl ? "rtl" : "ltr"}
         style={{
           color: "#ccc",
           fontSize: 12,
@@ -74,6 +82,7 @@ function AgentCard({ name, label, color, text, stance }) {
           margin: 0,
           minHeight: 120,
           lineHeight: 1.6,
+          textAlign: rtl ? "right" : "left",
         }}
       >
         {text || "— 待機中 —"}
@@ -138,8 +147,12 @@ export default function SingleView() {
   const [verdict, setVerdict] = useState(null);
   const [phase, setPhase] = useState("idle"); // idle | deliberating | speaking | testing
   const [sameInputResults, setSameInputResults] = useState([]);
+  const [langOverride, setLangOverride] = useState(""); // "" = auto
 
   const flight = MOCK_FLIGHTS[flightIndex];
+  const autoLang = useMemo(() => detectLanguage(flight?.origin), [flight]);
+  const activeLang = langOverride || autoLang;
+  const activeLangMeta = languageMeta(activeLang);
 
   const onAgentChunk = useCallback((agent, text) => {
     if (agent === "SECURITY") setSecurityText(text);
@@ -154,7 +167,10 @@ export default function SingleView() {
     setCareText("");
     setVerdict(null);
 
-    const result = await deliberateOne(flight, { onAgent: onAgentChunk });
+    const result = await deliberateOne(flight, {
+      onAgent: onAgentChunk,
+      language: activeLang,
+    });
     setVerdict(result.verdict);
 
     setPhase("speaking");
@@ -163,13 +179,13 @@ export default function SingleView() {
     await speak(result.careText, "shimmer");
 
     setPhase("done");
-  }, [flight, onAgentChunk]);
+  }, [flight, onAgentChunk, activeLang]);
 
   const runSameInputTest = useCallback(async () => {
     setPhase("testing");
     setSameInputResults([]);
     for (let i = 0; i < 10; i++) {
-      const r = await deliberateOne(flight);
+      const r = await deliberateOne(flight, { language: activeLang });
       const fj = r.verdict?.final_judgment ?? {};
       setSameInputResults((prev) => [
         ...prev,
@@ -183,7 +199,7 @@ export default function SingleView() {
       ]);
     }
     setPhase("done");
-  }, [flight]);
+  }, [flight, activeLang]);
 
   const nextFlight = () => {
     setFlightIndex((i) => (i + 1) % MOCK_FLIGHTS.length);
@@ -192,6 +208,7 @@ export default function SingleView() {
     setCareText("");
     setVerdict(null);
     setSameInputResults([]);
+    setLangOverride("");
     setPhase("idle");
   };
 
@@ -310,6 +327,44 @@ export default function SingleView() {
             {flight.congestionLevel}
           </div>
         </div>
+        <div style={{ marginLeft: "auto" }}>
+          <div style={{ color: "#555", fontSize: 10 }}>LANGUAGE</div>
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              marginTop: 2,
+            }}
+          >
+            <div style={{ color: "#ccc", fontSize: 14 }}>
+              {activeLangMeta.native}{" "}
+              <span style={{ color: "#555", fontSize: 11, letterSpacing: 2 }}>
+                ({activeLangMeta.displayCode})
+              </span>
+            </div>
+            <select
+              value={langOverride}
+              onChange={(e) => setLangOverride(e.target.value)}
+              disabled={isBusy}
+              style={{
+                background: "#0a0a0a",
+                color: "#888",
+                border: "1px solid #333",
+                padding: "2px 6px",
+                fontFamily: "monospace",
+                fontSize: 11,
+              }}
+            >
+              <option value="">AUTO ({autoLang.toUpperCase()})</option>
+              {Object.entries(LANG_META).map(([code, m]) => (
+                <option key={code} value={code}>
+                  {m.displayCode} · {m.native}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
       </div>
 
       {/* Controls */}
@@ -362,6 +417,7 @@ export default function SingleView() {
           color="#4488ff"
           text={securityText}
           stance={securityText ? extractStance(securityText) : null}
+          lang={activeLang}
         />
         <AgentCard
           name="FLOW"
@@ -369,6 +425,7 @@ export default function SingleView() {
           color="#ff8844"
           text={flowText}
           stance={flowText ? extractStance(flowText) : null}
+          lang={activeLang}
         />
         <AgentCard
           name="CARE"
@@ -376,6 +433,7 @@ export default function SingleView() {
           color="#88ff88"
           text={careText}
           stance={careText ? extractStance(careText) : null}
+          lang={activeLang}
         />
       </div>
 
