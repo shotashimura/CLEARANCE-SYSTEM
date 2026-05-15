@@ -83,6 +83,7 @@ async function parseStream(response, onChunk) {
 }
 
 async function callAgent(systemPrompt, flightData, onChunk) {
+  // P3: 過去履歴を一切渡さない。messages配列はサイクルごとに新規生成。
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -100,6 +101,34 @@ async function callAgent(systemPrompt, flightData, onChunk) {
     }),
   });
   return parseStream(res, onChunk);
+}
+
+async function callOrchestrator(securityText, flowText, careText, flightData) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: ORCHESTRATOR_PROMPT },
+        {
+          role: "user",
+          content: JSON.stringify({
+            securityText,
+            flowText,
+            careText,
+            flightData,
+          }),
+        },
+      ],
+    }),
+  });
+  const data = await res.json();
+  return JSON.parse(data.choices[0].message.content);
 }
 
 async function speak(text, voice) {
@@ -127,8 +156,17 @@ async function speak(text, voice) {
 
 const PERMISSION_COLOR = {
   GRANTED: "#00ff88",
-  DENIED: "#ff3366",
+  GRANTED_CONDITIONAL: "#88ff44",
   FLAGGED: "#ffaa00",
+  PROCESSING: "#88aaff",
+  DENIED: "#ff3366",
+};
+
+const BEHAVIOR_LABEL = {
+  hesitant: "HESITANT",
+  assertive: "ASSERTIVE",
+  frozen: "FROZEN",
+  random_walk: "RANDOM_WALK",
 };
 
 function extractStance(text) {
@@ -187,13 +225,45 @@ function AgentCard({ name, label, color, text, stance }) {
   );
 }
 
+function DecisivenessBar({ value }) {
+  const v = typeof value === "number" ? Math.max(0, Math.min(1, value)) : 0;
+  const color = v >= 0.7 ? "#00ff88" : v >= 0.4 ? "#ffaa00" : "#ff3366";
+  return (
+    <div>
+      <div style={{ color: "#555", fontSize: 10 }}>DECISIVENESS</div>
+      <div
+        style={{
+          width: 120,
+          height: 8,
+          background: "#1a1a1a",
+          marginTop: 6,
+          position: "relative",
+        }}
+      >
+        <div
+          style={{
+            width: `${v * 100}%`,
+            height: "100%",
+            background: color,
+            transition: "width 0.4s",
+          }}
+        />
+      </div>
+      <div style={{ color, fontSize: 11, marginTop: 4, letterSpacing: 1 }}>
+        {v.toFixed(2)}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [flightIndex, setFlightIndex] = useState(0);
   const [securityText, setSecurityText] = useState("");
   const [flowText, setFlowText] = useState("");
   const [careText, setCareText] = useState("");
   const [verdict, setVerdict] = useState(null);
-  const [phase, setPhase] = useState("idle"); // idle | deliberating | speaking | done
+  const [phase, setPhase] = useState("idle"); // idle | deliberating | speaking | done | testing
+  const [sameInputResults, setSameInputResults] = useState([]); // P3 verification
 
   const flight = MOCK_FLIGHTS[flightIndex];
 
@@ -210,31 +280,7 @@ export default function App() {
       callAgent(CARE_PROMPT, flight, setCareText),
     ]);
 
-    const orchRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: ORCHESTRATOR_PROMPT },
-          {
-            role: "user",
-            content: JSON.stringify({
-              securityText: s,
-              flowText: f,
-              careText: c,
-              flightData: flight,
-            }),
-          },
-        ],
-      }),
-    });
-    const orchData = await orchRes.json();
-    const parsed = JSON.parse(orchData.choices[0].message.content);
+    const parsed = await callOrchestrator(s, f, c, flight);
     setVerdict(parsed);
 
     setPhase("speaking");
@@ -245,16 +291,46 @@ export default function App() {
     setPhase("done");
   }, [flight]);
 
+  // P3: 同じ入力で連続10回判定 → 結果がブレることを確認
+  const runSameInputTest = useCallback(async () => {
+    setPhase("testing");
+    setSameInputResults([]);
+    for (let i = 0; i < 10; i++) {
+      const [s, f, c] = await Promise.all([
+        callAgent(SECURITY_PROMPT, flight, () => {}),
+        callAgent(FLOW_PROMPT, flight, () => {}),
+        callAgent(CARE_PROMPT, flight, () => {}),
+      ]);
+      const parsed = await callOrchestrator(s, f, c, flight);
+      const fj = parsed?.final_judgment ?? {};
+      setSameInputResults((prev) => [
+        ...prev,
+        {
+          run: i + 1,
+          permission: fj.permission,
+          risk_score: fj.risk_score,
+          decisiveness: fj.decisiveness,
+          behavior: fj.behavior_modifier,
+        },
+      ]);
+    }
+    setPhase("done");
+  }, [flight]);
+
   const nextFlight = () => {
     setFlightIndex((i) => (i + 1) % MOCK_FLIGHTS.length);
     setSecurityText("");
     setFlowText("");
     setCareText("");
     setVerdict(null);
+    setSameInputResults([]);
     setPhase("idle");
   };
 
   const permission = verdict?.final_judgment?.permission;
+  const fj = verdict?.final_judgment;
+
+  const isBusy = phase === "deliberating" || phase === "speaking" || phase === "testing";
 
   return (
     <div
@@ -269,14 +345,43 @@ export default function App() {
     >
       {/* Header */}
       <div
-        style={{ marginBottom: 24, borderBottom: "1px solid #222", paddingBottom: 16 }}
+        style={{
+          marginBottom: 24,
+          borderBottom: "1px solid #222",
+          paddingBottom: 16,
+          display: "flex",
+          alignItems: "flex-end",
+          justifyContent: "space-between",
+          gap: 16,
+        }}
       >
-        <div style={{ color: "#555", fontSize: 10, letterSpacing: 4, marginBottom: 4 }}>
-          CLEARANCE SYSTEM — DELIBERATION INTERFACE
+        <div>
+          <div
+            style={{ color: "#555", fontSize: 10, letterSpacing: 4, marginBottom: 4 }}
+          >
+            CLEARANCE SYSTEM — DELIBERATION INTERFACE
+          </div>
+          <div style={{ color: "#fff", fontSize: 18, letterSpacing: 2 }}>
+            ▸ SECURITY · FLOW · CARE
+          </div>
         </div>
-        <div style={{ color: "#fff", fontSize: 18, letterSpacing: 2 }}>
-          ▸ SECURITY · FLOW · CARE
-        </div>
+        <button
+          onClick={runSameInputTest}
+          disabled={isBusy}
+          title="同じ入力で連続10回判定 → 判定がブレることを検証"
+          style={{
+            background: isBusy ? "#111" : "#0d0d0d",
+            border: "1px solid #444",
+            color: isBusy ? "#555" : "#bbb",
+            padding: "8px 14px",
+            cursor: isBusy ? "not-allowed" : "pointer",
+            fontFamily: "monospace",
+            letterSpacing: 2,
+            fontSize: 11,
+          }}
+        >
+          🔀 SAME INPUT TEST ×10
+        </button>
       </div>
 
       {/* Flight Info */}
@@ -349,16 +454,13 @@ export default function App() {
       <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
         <button
           onClick={deliberate}
-          disabled={phase === "deliberating" || phase === "speaking"}
+          disabled={isBusy}
           style={{
-            background:
-              phase === "deliberating" || phase === "speaking" ? "#111" : "#1a1a1a",
+            background: isBusy ? "#111" : "#1a1a1a",
             border: "1px solid #444",
-            color:
-              phase === "deliberating" || phase === "speaking" ? "#555" : "#fff",
+            color: isBusy ? "#555" : "#fff",
             padding: "10px 20px",
-            cursor:
-              phase === "deliberating" || phase === "speaking" ? "not-allowed" : "pointer",
+            cursor: isBusy ? "not-allowed" : "pointer",
             fontFamily: "monospace",
             letterSpacing: 2,
             fontSize: 12,
@@ -368,16 +470,19 @@ export default function App() {
             ? "▸ DELIBERATING..."
             : phase === "speaking"
             ? "▸ ANNOUNCING..."
+            : phase === "testing"
+            ? "▸ RUNNING TEST..."
             : "▸ INITIATE DELIBERATION"}
         </button>
         <button
           onClick={nextFlight}
+          disabled={isBusy}
           style={{
             background: "#0d0d0d",
             border: "1px solid #333",
-            color: "#888",
+            color: isBusy ? "#444" : "#888",
             padding: "10px 20px",
-            cursor: "pointer",
+            cursor: isBusy ? "not-allowed" : "pointer",
             fontFamily: "monospace",
             letterSpacing: 2,
             fontSize: 12,
@@ -423,18 +528,31 @@ export default function App() {
           }}
         >
           <div
-            style={{ color: "#555", fontSize: 10, letterSpacing: 3, marginBottom: 12 }}
+            style={{
+              color: "#555",
+              fontSize: 10,
+              letterSpacing: 3,
+              marginBottom: 12,
+            }}
           >
             [CLEARANCE ORCHESTRATOR] — FINAL VERDICT
           </div>
-          <div style={{ display: "flex", gap: 32, alignItems: "center", flexWrap: "wrap" }}>
+          <div
+            style={{
+              display: "flex",
+              gap: 32,
+              alignItems: "flex-start",
+              flexWrap: "wrap",
+            }}
+          >
             <div>
               <div style={{ color: "#555", fontSize: 10 }}>PERMISSION</div>
               <div
                 style={{
                   color: PERMISSION_COLOR[permission] || "#ccc",
-                  fontSize: 24,
+                  fontSize: 22,
                   letterSpacing: 3,
+                  marginTop: 2,
                 }}
               >
                 {permission}
@@ -442,34 +560,129 @@ export default function App() {
             </div>
             <div>
               <div style={{ color: "#555", fontSize: 10 }}>SPEED FACTOR</div>
-              <div style={{ color: "#ccc", fontSize: 18 }}>
-                {verdict.final_judgment?.speed_factor?.toFixed(1)}×
+              <div style={{ color: "#ccc", fontSize: 18, marginTop: 6 }}>
+                {fj?.speed_factor?.toFixed(2)}×
               </div>
             </div>
             <div>
               <div style={{ color: "#555", fontSize: 10 }}>DIRECTION</div>
-              <div style={{ color: "#ccc", fontSize: 14, letterSpacing: 2 }}>
-                {verdict.final_judgment?.direction?.toUpperCase()}
+              <div
+                style={{ color: "#ccc", fontSize: 14, letterSpacing: 2, marginTop: 8 }}
+              >
+                {fj?.direction?.toUpperCase()}
               </div>
             </div>
+            <div>
+              <div style={{ color: "#555", fontSize: 10 }}>DURATION</div>
+              <div style={{ color: "#ccc", fontSize: 14, marginTop: 8 }}>
+                {fj?.duration_seconds}s
+              </div>
+            </div>
+            <div>
+              <div style={{ color: "#555", fontSize: 10 }}>BEHAVIOR</div>
+              <div
+                style={{
+                  color: "#ccc",
+                  fontSize: 12,
+                  letterSpacing: 2,
+                  marginTop: 8,
+                }}
+              >
+                {BEHAVIOR_LABEL[fj?.behavior_modifier] || "—"}
+              </div>
+            </div>
+            <DecisivenessBar value={fj?.decisiveness} />
             <div style={{ marginLeft: "auto" }}>
               <div style={{ color: "#333", fontSize: 10, letterSpacing: 2 }}>
                 REASONING: CLASSIFIED
+              </div>
+              <div
+                style={{
+                  color: "#333",
+                  fontSize: 10,
+                  letterSpacing: 2,
+                  marginTop: 4,
+                }}
+              >
+                RISK_SCORE: WITHHELD
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Raw JSON (collapsed) */}
+      {/* SAME INPUT TEST results — P3 verification */}
+      {sameInputResults.length > 0 && (
+        <div
+          style={{
+            marginTop: 20,
+            border: "1px solid #333",
+            borderRadius: 4,
+            padding: "12px 16px",
+            background: "#0a0a0a",
+          }}
+        >
+          <div
+            style={{
+              color: "#888",
+              fontSize: 10,
+              letterSpacing: 3,
+              marginBottom: 8,
+            }}
+          >
+            SAME INPUT TEST — FLAT JUDGMENT VERIFICATION ({flight.flight})
+          </div>
+          <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ color: "#555", textAlign: "left" }}>
+                <th style={{ padding: "4px 8px" }}>#</th>
+                <th style={{ padding: "4px 8px" }}>PERMISSION</th>
+                <th style={{ padding: "4px 8px" }}>RISK</th>
+                <th style={{ padding: "4px 8px" }}>DECISIVENESS</th>
+                <th style={{ padding: "4px 8px" }}>BEHAVIOR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sameInputResults.map((r) => (
+                <tr key={r.run} style={{ borderTop: "1px solid #1a1a1a" }}>
+                  <td style={{ padding: "4px 8px", color: "#666" }}>{r.run}</td>
+                  <td
+                    style={{
+                      padding: "4px 8px",
+                      color: PERMISSION_COLOR[r.permission] || "#ccc",
+                      letterSpacing: 1,
+                    }}
+                  >
+                    {r.permission}
+                  </td>
+                  <td style={{ padding: "4px 8px", color: "#888" }}>{r.risk_score}</td>
+                  <td style={{ padding: "4px 8px", color: "#888" }}>
+                    {r.decisiveness?.toFixed?.(2)}
+                  </td>
+                  <td style={{ padding: "4px 8px", color: "#888" }}>
+                    {BEHAVIOR_LABEL[r.behavior] || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ color: "#444", fontSize: 10, marginTop: 8 }}>
+            ※ 同一入力でも判定がブレることが仕様（毎回フラット判定 / 履歴非参照）
+          </div>
+        </div>
+      )}
+
+      {/* Raw JSON (collapsed) — operator-only, includes risk_score */}
       {verdict && (
         <details style={{ marginTop: 16 }}>
           <summary
             style={{ color: "#444", fontSize: 10, cursor: "pointer", letterSpacing: 2 }}
           >
-            RAW OUTPUT
+            RAW OUTPUT (OPERATOR ONLY)
           </summary>
-          <pre style={{ color: "#333", fontSize: 10, marginTop: 8, whiteSpace: "pre-wrap" }}>
+          <pre
+            style={{ color: "#333", fontSize: 10, marginTop: 8, whiteSpace: "pre-wrap" }}
+          >
             {JSON.stringify(verdict, null, 2)}
           </pre>
         </details>
