@@ -1,7 +1,8 @@
-import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
+import { BrowserRouter, Routes, Route, NavLink, useLocation } from "react-router-dom";
 import "./App.css";
 import SingleView from "./pages/SingleView.jsx";
 import CycleView from "./pages/CycleView.jsx";
+import BoardView from "./pages/BoardView.jsx";
 
 function NavBar() {
   const linkStyle = ({ isActive }) => ({
@@ -36,24 +37,29 @@ function NavBar() {
         <NavLink to="/cycle" style={linkStyle}>
           CYCLE
         </NavLink>
+        <NavLink to="/board" style={linkStyle}>
+          BOARD
+        </NavLink>
       </div>
     </div>
   );
 }
 
 function Layout({ children }) {
+  const location = useLocation();
+  const isBoard = location.pathname === "/board";
   return (
     <div
       style={{
-        background: "#050505",
+        background: isBoard ? "#000" : "#050505",
         minHeight: "100vh",
         color: "#ccc",
         fontFamily: "monospace",
         boxSizing: "border-box",
       }}
     >
-      <NavBar />
-      <div style={{ padding: "24px" }}>{children}</div>
+      {!isBoard && <NavBar />}
+      <div style={{ padding: isBoard ? 0 : "24px" }}>{children}</div>
     </div>
   );
 }
@@ -65,6 +71,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<SingleView />} />
           <Route path="/cycle" element={<CycleView />} />
+          <Route path="/board" element={<BoardView />} />
         </Routes>
       </Layout>
     </BrowserRouter>
