@@ -1,5 +1,5 @@
-import { useState, useCallback, useMemo } from "react";
-import { MOCK_FLIGHTS } from "../lib/flights.js";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { fetchFiveFlights, MOCK_FLIGHTS } from "../lib/flights.js";
 import { INDIVIDUALS, translateJudgment } from "../lib/translateJudgment.js";
 import { deliberateOne } from "../lib/orchestrator.js";
 import {
@@ -140,19 +140,43 @@ function DecisivenessBar({ value }) {
 }
 
 export default function SingleView() {
+  const [flights, setFlights] = useState(MOCK_FLIGHTS);
+  const [flightSource, setFlightSource] = useState("mock");
   const [flightIndex, setFlightIndex] = useState(0);
   const [securityText, setSecurityText] = useState("");
   const [flowText, setFlowText] = useState("");
   const [careText, setCareText] = useState("");
   const [verdict, setVerdict] = useState(null);
-  const [phase, setPhase] = useState("idle"); // idle | deliberating | speaking | testing
+  const [phase, setPhase] = useState("idle"); // idle | fetching | deliberating | speaking | testing
   const [sameInputResults, setSameInputResults] = useState([]);
   const [langOverride, setLangOverride] = useState(""); // "" = auto
 
-  const flight = MOCK_FLIGHTS[flightIndex];
+  const flight = flights[flightIndex] ?? MOCK_FLIGHTS[0];
   const autoLang = useMemo(() => detectLanguage(flight?.origin), [flight]);
   const activeLang = langOverride || autoLang;
   const activeLangMeta = languageMeta(activeLang);
+
+  // 起動時に OpenSky から 5 便取得（CycleView と同じソース）。失敗時はモック。
+  const refreshFlights = useCallback(async () => {
+    setPhase("fetching");
+    const fetched = await fetchFiveFlights();
+    setFlights(fetched);
+    setFlightSource(
+      fetched.some((f) => f.source === "opensky") ? "opensky" : "mock"
+    );
+    setFlightIndex(0);
+    setSecurityText("");
+    setFlowText("");
+    setCareText("");
+    setVerdict(null);
+    setSameInputResults([]);
+    setLangOverride("");
+    setPhase("idle");
+  }, []);
+
+  useEffect(() => {
+    refreshFlights();
+  }, [refreshFlights]);
 
   const onAgentChunk = useCallback((agent, text) => {
     if (agent === "SECURITY") setSecurityText(text);
@@ -202,7 +226,7 @@ export default function SingleView() {
   }, [flight, activeLang]);
 
   const nextFlight = () => {
-    setFlightIndex((i) => (i + 1) % MOCK_FLIGHTS.length);
+    setFlightIndex((i) => (i + 1) % flights.length);
     setSecurityText("");
     setFlowText("");
     setCareText("");
@@ -214,7 +238,11 @@ export default function SingleView() {
 
   const permission = verdict?.final_judgment?.permission;
   const fj = verdict?.final_judgment;
-  const isBusy = phase === "deliberating" || phase === "speaking" || phase === "testing";
+  const isBusy =
+    phase === "fetching" ||
+    phase === "deliberating" ||
+    phase === "speaking" ||
+    phase === "testing";
 
   return (
     <>
@@ -239,24 +267,60 @@ export default function SingleView() {
           <div style={{ color: "#fff", fontSize: 18, letterSpacing: 2 }}>
             ▸ SECURITY · FLOW · CARE
           </div>
+          <div style={{ color: "#555", fontSize: 10, letterSpacing: 2, marginTop: 6 }}>
+            {phase === "fetching" ? (
+              "FETCHING LIVE FLIGHTS..."
+            ) : (
+              <>
+                {flights.length} FLIGHTS LOADED · SOURCE:{" "}
+                <span
+                  style={{
+                    color: flightSource === "opensky" ? "#00ff88" : "#ffaa00",
+                    letterSpacing: 2,
+                  }}
+                >
+                  {flightSource.toUpperCase()}
+                </span>
+              </>
+            )}
+          </div>
         </div>
-        <button
-          onClick={runSameInputTest}
-          disabled={isBusy}
-          title="同じ入力で連続10回判定 → 判定がブレることを検証"
-          style={{
-            background: isBusy ? "#111" : "#0d0d0d",
-            border: "1px solid #444",
-            color: isBusy ? "#555" : "#bbb",
-            padding: "8px 14px",
-            cursor: isBusy ? "not-allowed" : "pointer",
-            fontFamily: "monospace",
-            letterSpacing: 2,
-            fontSize: 11,
-          }}
-        >
-          🔀 SAME INPUT TEST ×10
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={refreshFlights}
+            disabled={isBusy}
+            title="OpenSky から稼働中フライトを再取得"
+            style={{
+              background: isBusy ? "#111" : "#0d0d0d",
+              border: "1px solid #333",
+              color: isBusy ? "#444" : "#888",
+              padding: "8px 14px",
+              cursor: isBusy ? "not-allowed" : "pointer",
+              fontFamily: "monospace",
+              letterSpacing: 2,
+              fontSize: 11,
+            }}
+          >
+            ↻ REFRESH FLIGHTS
+          </button>
+          <button
+            onClick={runSameInputTest}
+            disabled={isBusy}
+            title="同じ入力で連続10回判定 → 判定がブレることを検証"
+            style={{
+              background: isBusy ? "#111" : "#0d0d0d",
+              border: "1px solid #444",
+              color: isBusy ? "#555" : "#bbb",
+              padding: "8px 14px",
+              cursor: isBusy ? "not-allowed" : "pointer",
+              fontFamily: "monospace",
+              letterSpacing: 2,
+              fontSize: 11,
+            }}
+          >
+            🔀 SAME INPUT TEST ×10
+          </button>
+        </div>
       </div>
 
       {/* Flight Info */}
@@ -383,7 +447,9 @@ export default function SingleView() {
             fontSize: 12,
           }}
         >
-          {phase === "deliberating"
+          {phase === "fetching"
+            ? "▸ FETCHING FLIGHTS..."
+            : phase === "deliberating"
             ? "▸ DELIBERATING..."
             : phase === "speaking"
             ? "▸ ANNOUNCING..."
