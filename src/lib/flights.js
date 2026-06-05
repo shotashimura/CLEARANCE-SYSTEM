@@ -2,6 +2,13 @@
 // state vector に出発地・目的地は含まれないため、callsign / origin_country と
 // 地域 bounding box から擬似的にIATA空港コードを推定する（v2段階の妥協）。
 
+// OpenSky は自ドメイン以外への CORS を許可しないため、dev では Vite の
+// プロキシ（/opensky → https://opensky-network.org、vite.config.js 参照）を
+// 経由して同一オリジン化する。本番ビルドでは直 URL（CORS で失敗時はモック）。
+const OPENSKY_BASE = import.meta.env.DEV
+  ? "/opensky"
+  : "https://opensky-network.org";
+
 // 5つの地域 bounding box。各地域から1便ずつ取って「世界中で同時に動いている感」を出す。
 export const BOUNDING_BOXES = [
   { region: "east_asia",     lamin: 20, lomin: 100, lamax: 50, lomax: 150 },
@@ -117,7 +124,7 @@ function isCruising(state) {
 
 async function fetchRegion(box, signal) {
   const url =
-    `https://opensky-network.org/api/states/all?` +
+    `${OPENSKY_BASE}/api/states/all?` +
     `lamin=${box.lamin}&lomin=${box.lomin}&lamax=${box.lamax}&lomax=${box.lomax}`;
   const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`OpenSky ${box.region} ${res.status}`);
