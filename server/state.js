@@ -34,6 +34,7 @@ export class ClearanceState {
         discussion: null, // { securityText, flowText, careText }
         osc: null, // base OSC params（衝突補正前）
         oscCorrected: null, // 衝突補正後（Step4 で設定）
+        oscSent: null, // 実際に M5Stack へ送信した内容 { lines, target, sentAt }
         position: null, // { x, y, heading, ts }（Step4 で設定）
         collision: null, // { state, reason }（Step4 で設定）
         updatedAt: null,
@@ -77,6 +78,20 @@ export class ClearanceState {
     if (oscCorrected !== undefined) rec.oscCorrected = oscCorrected;
     if (position !== undefined) rec.position = position;
     if (collision !== undefined) rec.collision = collision;
+  }
+
+  // 実際に M5Stack へ送信した OSC ログを記録する。
+  setOscSent(suitcaseId, oscSent) {
+    const rec = this.suitcases.get(suitcaseId);
+    if (!rec) return;
+    rec.oscSent = oscSent ?? null;
+  }
+
+  // 送信に使う実効パラメータ（衝突補正後があればそれ、無ければ base）。
+  effectiveOsc(suitcaseId) {
+    const rec = this.suitcases.get(suitcaseId);
+    if (!rec) return null;
+    return rec.oscCorrected ?? rec.osc ?? null;
   }
 
   pushHistory(entries) {

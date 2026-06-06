@@ -17,6 +17,7 @@ import {
   announcementFor,
   pickCycleAnnouncement,
 } from "../src/lib/announcement.js";
+import { initOscPorts, sendSuitcaseOsc, closeOscPorts } from "./osc.js";
 
 const PORT = Number(process.env.CLEARANCE_PORT ?? 8787);
 const CYCLE_GAP_MS = Number(process.env.CLEARANCE_CYCLE_GAP_MS ?? 10_000);
@@ -109,10 +110,20 @@ async function runCycle() {
   state.incrementCycle();
 
   // TODO(Step4): 位置 provider + 衝突回避で oscCorrected を算出し setCorrected
-  // TODO(Step3): correctedOsc（無ければ base osc）を OSC UDP で M5Stack へ送信
+
+  // OSC 送信: 実効パラメータ（補正後があればそれ、無ければ base）を
+  // 各スーツケースの対応 M5Stack へ UDP 送信する。
+  let oscCount = 0;
+  for (const s of FLEET) {
+    const params = state.effectiveOsc(s.suitcaseId);
+    if (!params) continue;
+    const sent = sendSuitcaseOsc(s.suitcaseId, params);
+    state.setOscSent(s.suitcaseId, sent);
+    oscCount += 1;
+  }
 
   broadcast();
-  console.log(`[cycle ${state.cycle}] judged ${cycleResults.length}/5`);
+  console.log(`[cycle ${state.cycle}] judged ${cycleResults.length}/5, osc sent ${oscCount}/5`);
 }
 
 async function loop() {
@@ -128,6 +139,16 @@ server.listen(PORT, () => {
   console.log(`CLEARANCE central server on http://localhost:${PORT}`);
   console.log(`  WebSocket:  ws://localhost:${PORT}`);
   console.log(`  state:      http://localhost:${PORT}/state`);
+  initOscPorts();
   // 起動直後に最初のサイクル
   loop();
 });
+
+function shutdown() {
+  console.log("\n[server] shutting down...");
+  closeOscPorts();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 1000);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
