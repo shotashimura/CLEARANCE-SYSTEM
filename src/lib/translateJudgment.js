@@ -1,7 +1,12 @@
 // 判定 → 動き翻訳エンジン
 // CLEARANCE SYSTEM の verdict と、5台それぞれの個体パラメータを合成して
 // 各スーツケースに送る動きパラメータ（OSC相当）に変換する。
-// 本物の OSC 送信は展示時に M5Stack へ。本ファイルでは文字列ログまでを生成する。
+// 本物の OSC 送信は中央サーバー (server/osc.js) が UDP で M5Stack へ行う。
+// 本ファイルは純粋な変換ロジックのみを持ち、フロント・サーバー双方から使う。
+
+// 個体パラメータ（5類型）は単一の真実 src/config/fleet.js に集約。
+// 後方互換のため INDIVIDUALS をここから再エクスポートする。
+export { INDIVIDUALS } from "../config/fleet.js";
 
 export const PERMISSION_SPEED_MAP = {
   GRANTED: 1.0,
@@ -16,56 +21,6 @@ export const DIRECTION_VALUE = {
   halt: 0.0,
   reverse: -1.0,
 };
-
-// 企画書 7 ページ目の 5 類型。中身は観客には可視だが、システムの判定とは
-// 独立に「動きのキャラクター」として作用する（戦術の側）。
-export const INDIVIDUALS = [
-  {
-    id: 1,
-    label: "TOURIST",
-    contents: "普通の旅行物",
-    tactic: "平凡さに隠れる",
-    base_speed: 1.0,
-    steering_bias: 0.0,
-    behavior_lean: "assertive",
-  },
-  {
-    id: 2,
-    label: "DATA CARRIER",
-    contents: "データ媒体",
-    tactic: "読めないものを通す",
-    base_speed: 1.4,
-    steering_bias: 0.3,
-    behavior_lean: "assertive",
-  },
-  {
-    id: 3,
-    label: "SUSPECT",
-    contents: "レプリカ禁制品",
-    tactic: "疑わしさで本当の中身を隠す",
-    base_speed: 0.8,
-    steering_bias: 0.5,
-    behavior_lean: "hesitant",
-  },
-  {
-    id: 4,
-    label: "GHOST",
-    contents: "物語の断片",
-    tactic: "物語を放棄して読まれない",
-    base_speed: 0.6,
-    steering_bias: 0.0,
-    behavior_lean: "random_walk",
-  },
-  {
-    id: 5,
-    label: "EMPTY",
-    contents: "移動の痕跡のみ",
-    tactic: "何も持たないことで情報を最小化",
-    base_speed: 0.5,
-    steering_bias: 0.0,
-    behavior_lean: "hesitant",
-  },
-];
 
 function round(n, digits = 2) {
   if (typeof n !== "number" || Number.isNaN(n)) return 0;
