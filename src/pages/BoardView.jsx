@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { fetchFiveFlights, MOCK_FLIGHTS } from "../lib/flights.js";
-import { runCycle } from "../lib/orchestrator.js";
-import { INDIVIDUALS } from "../lib/translateJudgment.js";
-import { detectLanguage, languageMeta } from "../lib/lang.js";
-import { announcementFor, pickCycleAnnouncement } from "../lib/announcement.js";
+import { useEffect, useState } from "react";
+import { useClearanceState } from "../lib/clearanceClient.js";
+import { languageMeta } from "../lib/lang.js";
 import FlipText from "../components/FlipText.jsx";
+
+// DepartureBoard。中央サーバーの状態を WebSocket 購読して表示するだけ。
+// 自前の判定・OSC送信は行わない（単一の状態源）。
 
 const PERMISSION_COLOR = {
   GRANTED: "#00ff88",
@@ -22,64 +22,57 @@ const PERMISSION_SHORT = {
   DENIED: "DENIED",
 };
 
-const CYCLE_INTERVAL_MS = 8_000;       // サイクル間の待ち時間
-const FLIGHT_REFRESH_MS = 120_000;     // 2分ごとにOpenSky再取得
+const COLLISION_TAG = {
+  SLOW: "SLOW",
+  DIVERT: "DIVERT",
+  STOP: "STOP",
+  REVERSE: "REVERSE",
+};
+
 const HISTORY_LIMIT = 24;
 
-function formatTime(d) {
-  if (!d) return "—";
-  return d.toLocaleTimeString("en-GB", { hour12: false });
+function formatTime(ms) {
+  if (!ms) return "—";
+  return new Date(ms).toLocaleTimeString("en-GB", { hour12: false });
 }
 
-function Row({ individual, flight, result }) {
-  const fj = result?.verdict?.final_judgment;
+function Row({ suitcase }) {
+  const flight = suitcase?.flight;
+  const fj = suitcase?.verdict?.final_judgment;
   const permission = fj?.permission;
-  const speedFactor = fj?.speed_factor;
+  const osc = suitcase?.oscCorrected ?? suitcase?.osc;
   const color = PERMISSION_COLOR[permission] || "#444";
-  const lang = result?.language ?? (flight ? detectLanguage(flight.origin) : null);
+  const lang = suitcase?.language;
   const langDisplay = lang ? languageMeta(lang).displayCode : "--";
+  const collision = suitcase?.collision;
+  const intervened = collision && collision.state !== "CLEAR";
 
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "80px 90px 90px 130px 70px 1fr 100px",
+        gridTemplateColumns: "80px 90px 90px 130px 60px 1fr 110px 90px",
         alignItems: "center",
         padding: "12px 24px",
         borderBottom: "1px solid #1a1a1a",
-        gap: 16,
+        gap: 14,
       }}
     >
       <FlipText
-        value={`#${String(individual.id).padStart(3, "0")}`}
+        value={`#${String(suitcase.suitcaseId).padStart(3, "0")}`}
         color="#fff"
         fontSize={20}
         letterSpacing={3}
       />
-      <FlipText
-        value={flight?.origin ?? "---"}
-        color="#ccc"
-        fontSize={22}
-        letterSpacing={2}
-      />
-      <FlipText
-        value={flight?.destination ?? "---"}
-        color="#ccc"
-        fontSize={22}
-        letterSpacing={2}
-      />
+      <FlipText value={flight?.origin ?? "---"} color="#ccc" fontSize={22} letterSpacing={2} />
+      <FlipText value={flight?.destination ?? "---"} color="#ccc" fontSize={22} letterSpacing={2} />
       <FlipText
         value={flight?.callsign ?? flight?.flight ?? "---"}
         color="#888"
         fontSize={16}
         letterSpacing={2}
       />
-      <FlipText
-        value={langDisplay}
-        color="#888"
-        fontSize={16}
-        letterSpacing={2}
-      />
+      <FlipText value={langDisplay} color="#888" fontSize={16} letterSpacing={2} />
       <FlipText
         value={permission ? PERMISSION_SHORT[permission] || permission : "PROCESSING"}
         color={color}
@@ -87,128 +80,46 @@ function Row({ individual, flight, result }) {
         letterSpacing={3}
       />
       <FlipText
-        value={typeof speedFactor === "number" ? `${speedFactor.toFixed(2)}×` : "—"}
+        value={typeof osc?.speed === "number" ? `${osc.speed.toFixed(2)}` : "—"}
         color="#aaa"
         fontSize={18}
         align="right"
       />
+      <div style={{ textAlign: "right" }}>
+        {intervened ? (
+          <span
+            style={{
+              color: "#ffd066",
+              fontSize: 12,
+              letterSpacing: 2,
+              border: "1px solid #5a4400",
+              padding: "2px 6px",
+            }}
+          >
+            {COLLISION_TAG[collision.state] || collision.state}
+          </span>
+        ) : (
+          <span style={{ color: "#2a2a2a", fontSize: 12 }}>—</span>
+        )}
+      </div>
     </div>
   );
 }
 
 export default function BoardView() {
-  const [flights, setFlights] = useState(MOCK_FLIGHTS);
-  const [results, setResults] = useState([null, null, null, null, null]);
-  const [history, setHistory] = useState([]); // 古いものほど上、新しいものを下に追加
-  const [announcement, setAnnouncement] = useState(null);
-  const [now, setNow] = useState(new Date());
-  const [cycleCount, setCycleCount] = useState(0);
-  const [phase, setPhase] = useState("boot"); // boot | running
+  const { state, connected } = useClearanceState();
+  const [now, setNow] = useState(Date.now());
 
-  const cycleLockRef = useRef(false);
-  const stopRef = useRef(false);
-
-  // 時計
   useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
+    const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  // 初回フライト取得 + 定期再取得
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      const fetched = await fetchFiveFlights();
-      if (!cancelled) setFlights(fetched);
-    }
-    load();
-    const id = setInterval(load, FLIGHT_REFRESH_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
-
-  // メインの自動サイクル
-  useEffect(() => {
-    stopRef.current = false;
-    let timer = null;
-
-    async function loop() {
-      if (cycleLockRef.current || stopRef.current) return;
-      cycleLockRef.current = true;
-      setPhase("running");
-      // CURRENT 行をリセット（パタパタ感を出す）
-      setResults([null, null, null, null, null]);
-
-      try {
-        await runCycle(flights, {
-          onPairResult: (idx, r) => {
-            setResults((prev) => {
-              const next = [...prev];
-              next[idx] = r;
-              return next;
-            });
-          },
-        });
-      } catch {
-        // 失敗時もループは継続
-      }
-
-      setResults((finalResults) => {
-        // HISTORY に積む
-        const stamp = new Date();
-        const additions = finalResults
-          .map((r, i) => {
-            const fj = r?.verdict?.final_judgment;
-            if (!fj) return null;
-            const flight = flights[i];
-            return {
-              time: stamp,
-              suitcaseId: INDIVIDUALS[i].id,
-              callsign: flight?.callsign || flight?.flight || "----",
-              origin: flight?.origin || "---",
-              destination: flight?.destination || "---",
-              permission: fj.permission,
-              alert: announcementFor(r),
-            };
-          })
-          .filter(Boolean);
-        setHistory((prev) => {
-          const next = [...prev, ...additions];
-          if (next.length > HISTORY_LIMIT) {
-            return next.slice(next.length - HISTORY_LIMIT);
-          }
-          return next;
-        });
-
-        // ANNOUNCEMENT 抽出（対立検出時のみ）
-        const msg = pickCycleAnnouncement(finalResults);
-        setAnnouncement(msg);
-
-        return finalResults;
-      });
-
-      setCycleCount((c) => c + 1);
-      cycleLockRef.current = false;
-
-      if (!stopRef.current) {
-        timer = setTimeout(loop, CYCLE_INTERVAL_MS);
-      }
-    }
-
-    // 初回起動は flights が確定したあと少し遅らせる
-    timer = setTimeout(loop, 1500);
-    return () => {
-      stopRef.current = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [flights]);
-
-  const trackingSource = useMemo(
-    () => (flights.some((f) => f?.source === "opensky") ? "OPENSKY" : "MOCK"),
-    [flights]
-  );
+  const suitcases = state?.suitcases ?? [];
+  const history = (state?.history ?? []).slice(-HISTORY_LIMIT);
+  const announcement = state?.announcement ?? null;
+  const cycle = state?.cycle ?? 0;
+  const source = (state?.source ?? "—").toUpperCase();
 
   return (
     <div
@@ -245,7 +156,10 @@ export default function BoardView() {
             {formatTime(now)}
           </div>
           <div style={{ color: "#555", fontSize: 11, letterSpacing: 3, marginTop: 4 }}>
-            CYCLE {String(cycleCount).padStart(4, "0")} · SRC {trackingSource} · {phase.toUpperCase()}
+            CYCLE {String(cycle).padStart(4, "0")} · SRC {source} ·{" "}
+            <span style={{ color: connected ? "#00ff88" : "#ff3366" }}>
+              {connected ? "LINKED" : "DISCONNECTED"}
+            </span>
           </div>
         </div>
       </div>
@@ -255,13 +169,13 @@ export default function BoardView() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "80px 90px 90px 130px 70px 1fr 100px",
+            gridTemplateColumns: "80px 90px 90px 130px 60px 1fr 110px 90px",
             padding: "10px 24px",
             color: "#555",
             fontSize: 10,
             letterSpacing: 3,
             background: "#0a0a0a",
-            gap: 16,
+            gap: 14,
           }}
         >
           <div>SUITCASE</div>
@@ -271,15 +185,15 @@ export default function BoardView() {
           <div>LANG</div>
           <div>STATUS</div>
           <div style={{ textAlign: "right" }}>SPEED</div>
+          <div style={{ textAlign: "right" }}>SAFETY</div>
         </div>
-        {INDIVIDUALS.map((ind, idx) => (
-          <Row
-            key={ind.id}
-            individual={ind}
-            flight={flights[idx]}
-            result={results[idx]}
-          />
-        ))}
+        {suitcases.length === 0 ? (
+          <div style={{ color: "#444", padding: "24px", letterSpacing: 2 }}>
+            {connected ? "— awaiting first cycle —" : "— connecting to central server —"}
+          </div>
+        ) : (
+          suitcases.map((s) => <Row key={s.suitcaseId} suitcase={s} />)
+        )}
       </div>
 
       {/* HISTORY */}
@@ -292,14 +206,7 @@ export default function BoardView() {
           minHeight: 240,
         }}
       >
-        <div
-          style={{
-            color: "#555",
-            fontSize: 10,
-            letterSpacing: 4,
-            marginBottom: 12,
-          }}
-        >
+        <div style={{ color: "#555", fontSize: 10, letterSpacing: 4, marginBottom: 12 }}>
           HISTORY · LAST {HISTORY_LIMIT}
         </div>
         <div
@@ -318,7 +225,7 @@ export default function BoardView() {
             const color = PERMISSION_COLOR[h.permission] || "#888";
             return (
               <div
-                key={i}
+                key={`${h.time}-${h.suitcaseId}-${i}`}
                 style={{
                   display: "grid",
                   gridTemplateColumns: "90px 60px 130px 1fr",
@@ -366,22 +273,10 @@ export default function BoardView() {
       >
         {announcement ? (
           <>
-            <div
-              style={{
-                color: "#ffaa00",
-                fontSize: 12,
-                letterSpacing: 4,
-              }}
-            >
+            <div style={{ color: "#ffaa00", fontSize: 12, letterSpacing: 4 }}>
               ATTENTION
             </div>
-            <div
-              style={{
-                color: "#ffd066",
-                fontSize: 18,
-                letterSpacing: 4,
-              }}
-            >
+            <div style={{ color: "#ffd066", fontSize: 18, letterSpacing: 4 }}>
               {announcement}
             </div>
           </>

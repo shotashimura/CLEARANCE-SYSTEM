@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { INDIVIDUALS, translateJudgment } from "../lib/translateJudgment.js";
-import { fetchFiveFlights, MOCK_FLIGHTS } from "../lib/flights.js";
-import { runCycle, deliberateOne } from "../lib/orchestrator.js";
-import { detectLanguage, languageMeta, isRTL } from "../lib/lang.js";
+import { useState } from "react";
+import { useClearanceState } from "../lib/clearanceClient.js";
+import { languageMeta, isRTL } from "../lib/lang.js";
+
+// 運用監視ビュー。中央サーバーの状態を購読し、5台の判定・議論・OSC・
+// 衝突状態を一覧表示する。判定・OSC送信は中央サーバーが担い、ここは読み取り専用。
 
 const PERMISSION_COLOR = {
   GRANTED: "#00ff88",
@@ -19,15 +20,19 @@ const BEHAVIOR_LABEL = {
   random_walk: "RANDOM_WALK",
 };
 
-const AGENT_COLOR = {
-  SECURITY: "#4488ff",
-  FLOW: "#ff8844",
-  CARE: "#88ff88",
+const COLLISION_COLOR = {
+  CLEAR: "#444",
+  SLOW: "#ffcc44",
+  DIVERT: "#ffaa00",
+  STOP: "#ff3366",
+  REVERSE: "#ff3366",
 };
 
+const AGENT_COLOR = { SECURITY: "#4488ff", FLOW: "#ff8844", CARE: "#88ff88" };
+
 function extractStance(text) {
-  const match = text.match(/\b(PASS|HOLD|DENY)\b/);
-  return match ? match[1] : null;
+  const m = text?.match(/\b(PASS|HOLD|DENY)\b/);
+  return m ? m[1] : null;
 }
 
 function StatusDot({ permission }) {
@@ -45,24 +50,25 @@ function StatusDot({ permission }) {
   );
 }
 
-function DiscussionPanel({ result }) {
-  if (!result) {
+function DiscussionPanel({ suitcase }) {
+  const d = suitcase?.discussion;
+  if (!d) {
     return (
       <div style={{ color: "#444", fontSize: 11, padding: "12px 16px" }}>
-        — 判定が完了すると議論ログが展開されます —
+        — 中央サーバーの判定待ち —
       </div>
     );
   }
-  const rtl = isRTL(result.language);
+  const rtl = isRTL(suitcase?.language);
   const items = [
-    { name: "SECURITY", label: "PAST × SAFETY", text: result.securityText },
-    { name: "FLOW", label: "PRESENT × EFFICIENCY", text: result.flowText },
-    { name: "CARE", label: "FUTURE × HUMANITY", text: result.careText },
+    { name: "SECURITY", label: "PAST × SAFETY", text: d.securityText },
+    { name: "FLOW", label: "PRESENT × EFFICIENCY", text: d.flowText },
+    { name: "CARE", label: "FUTURE × HUMANITY", text: d.careText },
   ];
   return (
     <div style={{ display: "flex", gap: 12, padding: "12px 16px" }}>
       {items.map((it) => {
-        const stance = it.text ? extractStance(it.text) : null;
+        const stance = extractStance(it.text);
         const color = AGENT_COLOR[it.name];
         return (
           <div
@@ -75,14 +81,10 @@ function DiscussionPanel({ result }) {
               padding: "10px 12px",
             }}
           >
-            <div
-              style={{ color, fontSize: 10, letterSpacing: 3, marginBottom: 4 }}
-            >
+            <div style={{ color, fontSize: 10, letterSpacing: 3, marginBottom: 4 }}>
               [{it.name}]
             </div>
-            <div style={{ color: "#666", fontSize: 9, marginBottom: 6 }}>
-              {it.label}
-            </div>
+            <div style={{ color: "#666", fontSize: 9, marginBottom: 6 }}>{it.label}</div>
             <pre
               dir={rtl ? "rtl" : "ltr"}
               style={{
@@ -106,17 +108,9 @@ function DiscussionPanel({ result }) {
                   fontSize: 10,
                   letterSpacing: 2,
                   background:
-                    stance === "PASS"
-                      ? "#003322"
-                      : stance === "DENY"
-                      ? "#330011"
-                      : "#332200",
+                    stance === "PASS" ? "#003322" : stance === "DENY" ? "#330011" : "#332200",
                   color:
-                    stance === "PASS"
-                      ? "#00ff88"
-                      : stance === "DENY"
-                      ? "#ff3366"
-                      : "#ffaa00",
+                    stance === "PASS" ? "#00ff88" : stance === "DENY" ? "#ff3366" : "#ffaa00",
                 }}
               >
                 {stance}
@@ -129,26 +123,13 @@ function DiscussionPanel({ result }) {
   );
 }
 
-function OscBlock({ result, individual }) {
-  if (!result?.verdict) return null;
-  const t = translateJudgment(result.verdict, individual);
+function OscBlock({ suitcase }) {
+  const sent = suitcase?.oscSent;
+  if (!sent) return null;
   return (
-    <div
-      style={{
-        padding: "10px 16px",
-        background: "#050505",
-        borderTop: "1px solid #1a1a1a",
-      }}
-    >
-      <div
-        style={{
-          color: "#666",
-          fontSize: 10,
-          letterSpacing: 2,
-          marginBottom: 6,
-        }}
-      >
-        OUTBOUND TELEMETRY · M5Stack receiver offline
+    <div style={{ padding: "10px 16px", background: "#050505", borderTop: "1px solid #1a1a1a" }}>
+      <div style={{ color: "#666", fontSize: 10, letterSpacing: 2, marginBottom: 6 }}>
+        OUTBOUND OSC → {sent.target?.host}:{sent.target?.port} ({suitcase.m5stack?.id})
       </div>
       <pre
         style={{
@@ -159,19 +140,21 @@ function OscBlock({ result, individual }) {
           whiteSpace: "pre-wrap",
         }}
       >
-        {t.oscLines.join("\n")}
+        {(sent.lines ?? []).join("\n")}
       </pre>
     </div>
   );
 }
 
-function SuitcaseRow({ individual, flight, result, expanded, onToggle }) {
-  const fj = result?.verdict?.final_judgment;
+function SuitcaseRow({ suitcase, expanded, onToggle }) {
+  const flight = suitcase?.flight;
+  const fj = suitcase?.verdict?.final_judgment;
   const permission = fj?.permission;
-  const speed = fj?.speed_factor;
-  const behavior = fj?.behavior_modifier;
-  const lang = result?.language ?? (flight ? detectLanguage(flight.origin) : null);
+  const osc = suitcase?.oscCorrected ?? suitcase?.osc;
+  const behavior = osc?.behavior ?? fj?.behavior_modifier;
+  const lang = suitcase?.language;
   const langInfo = lang ? languageMeta(lang) : null;
+  const collision = suitcase?.collision;
   return (
     <div
       style={{
@@ -183,17 +166,18 @@ function SuitcaseRow({ individual, flight, result, expanded, onToggle }) {
         onClick={onToggle}
         style={{
           display: "grid",
-          gridTemplateColumns: "60px 1fr 120px 70px 170px 90px 110px 50px",
+          gridTemplateColumns: "60px 1fr 110px 60px 150px 80px 100px 110px 40px",
           alignItems: "center",
           padding: "10px 16px",
           cursor: "pointer",
           fontSize: 12,
+          gap: 6,
         }}
       >
-        <div style={{ color: "#fff", letterSpacing: 2 }}>#{individual.id}</div>
+        <div style={{ color: "#fff", letterSpacing: 2 }}>#{suitcase.suitcaseId}</div>
         <div>
-          <div style={{ color: "#ccc" }}>{individual.label}</div>
-          <div style={{ color: "#555", fontSize: 10 }}>{individual.contents}</div>
+          <div style={{ color: "#ccc" }}>{suitcase.label}</div>
+          <div style={{ color: "#555", fontSize: 10 }}>{suitcase.contents}</div>
         </div>
         <div style={{ color: "#888" }}>
           {flight ? (
@@ -207,17 +191,8 @@ function SuitcaseRow({ individual, flight, result, expanded, onToggle }) {
             <span style={{ color: "#333" }}>—</span>
           )}
         </div>
-        <div>
-          {langInfo ? (
-            <>
-              <div style={{ color: "#aaa", fontSize: 11, letterSpacing: 2 }}>
-                {langInfo.displayCode}
-              </div>
-              <div style={{ color: "#555", fontSize: 10 }}>{langInfo.native}</div>
-            </>
-          ) : (
-            <span style={{ color: "#333" }}>—</span>
-          )}
+        <div style={{ color: "#aaa", fontSize: 11, letterSpacing: 1 }}>
+          {langInfo?.displayCode ?? "--"}
         </div>
         <div>
           {permission ? (
@@ -238,10 +213,19 @@ function SuitcaseRow({ individual, flight, result, expanded, onToggle }) {
           )}
         </div>
         <div style={{ color: "#ccc" }}>
-          {typeof speed === "number" ? `${speed.toFixed(2)}×` : "—"}
+          {typeof osc?.speed === "number" ? `${osc.speed.toFixed(2)}` : "—"}
         </div>
-        <div style={{ color: "#888", letterSpacing: 2, fontSize: 11 }}>
+        <div style={{ color: "#888", letterSpacing: 1, fontSize: 11 }}>
           {BEHAVIOR_LABEL[behavior] || "—"}
+        </div>
+        <div
+          style={{
+            color: COLLISION_COLOR[collision?.state] || "#444",
+            letterSpacing: 1,
+            fontSize: 11,
+          }}
+        >
+          {collision?.state ?? "—"}
         </div>
         <div style={{ color: "#444", fontSize: 12, textAlign: "right" }}>
           {expanded ? "▾" : "▸"}
@@ -249,8 +233,8 @@ function SuitcaseRow({ individual, flight, result, expanded, onToggle }) {
       </div>
       {expanded && (
         <>
-          <DiscussionPanel result={result} />
-          <OscBlock result={result} individual={individual} />
+          <DiscussionPanel suitcase={suitcase} />
+          <OscBlock suitcase={suitcase} />
         </>
       )}
     </div>
@@ -258,75 +242,17 @@ function SuitcaseRow({ individual, flight, result, expanded, onToggle }) {
 }
 
 export default function CycleView() {
-  const [flights, setFlights] = useState(MOCK_FLIGHTS);
-  const [flightSource, setFlightSource] = useState("mock");
-  const [results, setResults] = useState([null, null, null, null, null]);
-  const [phase, setPhase] = useState("idle"); // idle | fetching | deliberating | testing
+  const { state, connected } = useClearanceState();
   const [expandedId, setExpandedId] = useState(null);
-  const [sameInputResults, setSameInputResults] = useState([]);
-  const [lastFetched, setLastFetched] = useState(null);
 
-  const refreshFlights = useCallback(async () => {
-    setPhase("fetching");
-    const fetched = await fetchFiveFlights();
-    setFlights(fetched);
-    setFlightSource(fetched.some((f) => f.source === "opensky") ? "opensky" : "mock");
-    setLastFetched(new Date());
-    setPhase("idle");
-  }, []);
-
-  useEffect(() => {
-    refreshFlights();
-    const id = setInterval(refreshFlights, 60_000);
-    return () => clearInterval(id);
-  }, [refreshFlights]);
-
-  const runDeliberation = useCallback(async () => {
-    setPhase("deliberating");
-    setResults([null, null, null, null, null]);
-    setExpandedId(null);
-    await runCycle(flights, {
-      onPairResult: (idx, r) => {
-        setResults((prev) => {
-          const next = [...prev];
-          next[idx] = r;
-          return next;
-        });
-      },
-    });
-    setPhase("idle");
-  }, [flights]);
-
-  const runSameInputTest = useCallback(async () => {
-    setPhase("testing");
-    setSameInputResults([]);
-    const target = flights[0];
-    for (let i = 0; i < 10; i++) {
-      const r = await deliberateOne(target);
-      const fj = r.verdict?.final_judgment ?? {};
-      setSameInputResults((prev) => [
-        ...prev,
-        {
-          run: i + 1,
-          permission: fj.permission,
-          risk_score: fj.risk_score,
-          decisiveness: fj.decisiveness,
-          behavior: fj.behavior_modifier,
-        },
-      ]);
-    }
-    setPhase("idle");
-  }, [flights]);
-
-  const isBusy = phase !== "idle";
-
-  const trackingSummary = useMemo(() => {
-    const callsigns = flights
-      .map((f) => f?.callsign || f?.flight)
+  const suitcases = state?.suitcases ?? [];
+  const cycle = state?.cycle ?? 0;
+  const source = (state?.source ?? "—").toUpperCase();
+  const trackingSummary =
+    suitcases
+      .map((s) => s?.flight?.callsign || s?.flight?.flight)
       .filter(Boolean)
-      .join(" · ");
-    return callsigns || "—";
-  }, [flights]);
+      .join(" · ") || "—";
 
   return (
     <>
@@ -344,89 +270,28 @@ export default function CycleView() {
         }}
       >
         <div>
-          <div
-            style={{ color: "#555", fontSize: 10, letterSpacing: 4, marginBottom: 4 }}
-          >
-            FLEET DELIBERATION INTERFACE
+          <div style={{ color: "#555", fontSize: 10, letterSpacing: 4, marginBottom: 4 }}>
+            FLEET MONITOR — CENTRAL SERVER
           </div>
           <div style={{ color: "#fff", fontSize: 18, letterSpacing: 2 }}>
-            ▸ 5 SUITCASES · PARALLEL CLEARANCE
+            ▸ 5 SUITCASES · LIVE SUBSCRIPTION
           </div>
         </div>
         <div style={{ textAlign: "right" }}>
           <div style={{ color: "#555", fontSize: 10, letterSpacing: 2 }}>
-            TRACKING {flights.length} FLIGHTS · SOURCE:{" "}
+            CYCLE {String(cycle).padStart(4, "0")} · SOURCE:{" "}
             <span
-              style={{
-                color: flightSource === "opensky" ? "#00ff88" : "#ffaa00",
-                letterSpacing: 2,
-              }}
+              style={{ color: source === "OPENSKY" ? "#00ff88" : "#ffaa00", letterSpacing: 2 }}
             >
-              {flightSource.toUpperCase()}
+              {source}
+            </span>{" "}
+            ·{" "}
+            <span style={{ color: connected ? "#00ff88" : "#ff3366" }}>
+              {connected ? "LINKED" : "DISCONNECTED"}
             </span>
           </div>
-          <div style={{ color: "#888", fontSize: 11, marginTop: 4 }}>
-            {trackingSummary}
-          </div>
-          <div style={{ color: "#444", fontSize: 9, marginTop: 4 }}>
-            last sync: {lastFetched ? lastFetched.toLocaleTimeString() : "—"}
-          </div>
+          <div style={{ color: "#888", fontSize: 11, marginTop: 4 }}>{trackingSummary}</div>
         </div>
-      </div>
-
-      {/* Controls */}
-      <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-        <button
-          onClick={runDeliberation}
-          disabled={isBusy}
-          style={{
-            background: isBusy ? "#111" : "#1a1a1a",
-            border: "1px solid #444",
-            color: isBusy ? "#555" : "#fff",
-            padding: "10px 20px",
-            cursor: isBusy ? "not-allowed" : "pointer",
-            fontFamily: "monospace",
-            letterSpacing: 2,
-            fontSize: 12,
-          }}
-        >
-          {phase === "deliberating"
-            ? "▸ DELIBERATING 5 SUITCASES..."
-            : "▸ INITIATE CLEARANCE CYCLE"}
-        </button>
-        <button
-          onClick={refreshFlights}
-          disabled={isBusy}
-          style={{
-            background: "#0d0d0d",
-            border: "1px solid #333",
-            color: isBusy ? "#444" : "#888",
-            padding: "10px 20px",
-            cursor: isBusy ? "not-allowed" : "pointer",
-            fontFamily: "monospace",
-            letterSpacing: 2,
-            fontSize: 12,
-          }}
-        >
-          ↻ REFRESH FLIGHTS
-        </button>
-        <button
-          onClick={runSameInputTest}
-          disabled={isBusy}
-          title="先頭便で連続10回判定 → ブレることを検証"
-          style={{
-            background: "#0d0d0d",
-            border: "1px solid #333",
-            color: isBusy ? "#444" : "#888",
-            padding: "10px 20px",
-            cursor: isBusy ? "not-allowed" : "pointer",
-            fontFamily: "monospace",
-            letterSpacing: 2,
-            fontSize: 11,
-          }}
-        >
-          🔀 SAME INPUT TEST ×10
-        </button>
       </div>
 
       {/* Table */}
@@ -441,12 +306,13 @@ export default function CycleView() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "60px 1fr 120px 70px 170px 90px 110px 50px",
+            gridTemplateColumns: "60px 1fr 110px 60px 150px 80px 100px 110px 40px",
             padding: "8px 16px",
             color: "#555",
             fontSize: 10,
             letterSpacing: 2,
             background: "#0d0d0d",
+            gap: 6,
           }}
         >
           <div>SUITCASE</div>
@@ -456,102 +322,37 @@ export default function CycleView() {
           <div>PERMISSION</div>
           <div>SPEED</div>
           <div>BEHAVIOR</div>
+          <div>SAFETY</div>
           <div></div>
         </div>
-        {INDIVIDUALS.map((ind, idx) => (
-          <SuitcaseRow
-            key={ind.id}
-            individual={ind}
-            flight={flights[idx]}
-            result={results[idx]}
-            expanded={expandedId === ind.id}
-            onToggle={() => setExpandedId((e) => (e === ind.id ? null : ind.id))}
-          />
-        ))}
+        {suitcases.length === 0 ? (
+          <div style={{ color: "#444", padding: "20px 16px", letterSpacing: 1 }}>
+            {connected ? "— 中央サーバーの最初のサイクル待ち —" : "— 中央サーバーに接続中 —"}
+          </div>
+        ) : (
+          suitcases.map((s) => (
+            <SuitcaseRow
+              key={s.suitcaseId}
+              suitcase={s}
+              expanded={expandedId === s.suitcaseId}
+              onToggle={() =>
+                setExpandedId((e) => (e === s.suitcaseId ? null : s.suitcaseId))
+              }
+            />
+          ))
+        )}
       </div>
 
-      {/* SAME INPUT TEST results */}
-      {sameInputResults.length > 0 && (
-        <div
-          style={{
-            marginTop: 12,
-            border: "1px solid #333",
-            borderRadius: 4,
-            padding: "12px 16px",
-            background: "#0a0a0a",
-          }}
-        >
-          <div
-            style={{
-              color: "#888",
-              fontSize: 10,
-              letterSpacing: 3,
-              marginBottom: 8,
-            }}
-          >
-            SAME INPUT TEST — FLAT JUDGMENT VERIFICATION (
-            {flights[0]?.callsign || flights[0]?.flight})
-          </div>
-          <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ color: "#555", textAlign: "left" }}>
-                <th style={{ padding: "4px 8px" }}>#</th>
-                <th style={{ padding: "4px 8px" }}>PERMISSION</th>
-                <th style={{ padding: "4px 8px" }}>RISK</th>
-                <th style={{ padding: "4px 8px" }}>DECISIVENESS</th>
-                <th style={{ padding: "4px 8px" }}>BEHAVIOR</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sameInputResults.map((r) => (
-                <tr key={r.run} style={{ borderTop: "1px solid #1a1a1a" }}>
-                  <td style={{ padding: "4px 8px", color: "#666" }}>{r.run}</td>
-                  <td
-                    style={{
-                      padding: "4px 8px",
-                      color: PERMISSION_COLOR[r.permission] || "#ccc",
-                      letterSpacing: 1,
-                    }}
-                  >
-                    {r.permission}
-                  </td>
-                  <td style={{ padding: "4px 8px", color: "#888" }}>{r.risk_score}</td>
-                  <td style={{ padding: "4px 8px", color: "#888" }}>
-                    {r.decisiveness?.toFixed?.(2)}
-                  </td>
-                  <td style={{ padding: "4px 8px", color: "#888" }}>
-                    {BEHAVIOR_LABEL[r.behavior] || "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div style={{ color: "#444", fontSize: 10, marginTop: 8 }}>
-            ※ 同一入力でも判定がブレることが仕様（毎回フラット判定 / 履歴非参照）
-          </div>
-        </div>
-      )}
-
       {/* Operator-only raw */}
-      {results.some(Boolean) && (
+      {suitcases.length > 0 && (
         <details style={{ marginTop: 16 }}>
           <summary
             style={{ color: "#444", fontSize: 10, cursor: "pointer", letterSpacing: 2 }}
           >
-            RAW OUTPUT (OPERATOR ONLY)
+            RAW STATE (OPERATOR ONLY)
           </summary>
-          <pre
-            style={{ color: "#333", fontSize: 10, marginTop: 8, whiteSpace: "pre-wrap" }}
-          >
-            {JSON.stringify(
-              results.map((r, i) => ({
-                suitcase: INDIVIDUALS[i],
-                flight: flights[i],
-                verdict: r?.verdict,
-              })),
-              null,
-              2
-            )}
+          <pre style={{ color: "#333", fontSize: 10, marginTop: 8, whiteSpace: "pre-wrap" }}>
+            {JSON.stringify(suitcases, null, 2)}
           </pre>
         </details>
       )}
