@@ -15,6 +15,10 @@ dist-ssr
 .env
 .env.*
 
+# WiFi 認証情報など秘匿情報（ファーム）。コミットしない。
+secrets.h
+**/secrets.h
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

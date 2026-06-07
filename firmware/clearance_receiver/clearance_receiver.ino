@@ -25,9 +25,24 @@
 #include <WiFiUdp.h>
 #include <OSCMessage.h>
 
+// ---- WiFi 認証情報は secrets.h に置く（.gitignore 済み・コミットされない）----
+// 同じフォルダに secrets.h を作り、以下を記入する:
+//   #define WIFI_SSID "あなたのWiFi名"
+//   #define WIFI_PASS "あなたのパスワード"
+// secrets.h が無い場合は下のプレースホルダにフォールバックする（そのままでは接続しない）。
+#if defined(__has_include)
+  #if __has_include("secrets.h")
+    #include "secrets.h"
+  #endif
+#endif
+#ifndef WIFI_SSID
+  #define WIFI_SSID "YOUR_WIFI_SSID"
+#endif
+#ifndef WIFI_PASS
+  #define WIFI_PASS "YOUR_WIFI_PASSWORD"
+#endif
+
 // ---- ここを自分の環境に合わせて編集 ----------------------------------------
-const char* WIFI_SSID = "YOUR_WIFI_SSID";       // ← 自宅/会場の WiFi 名
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";   // ← パスワード
 const int   SUITCASE_ID = 1;                    // ← この機体が担当する番号 (1..5)
 const uint16_t OSC_PORT = 8000;                 // ← fleet.js の m5stack.port と一致
 // ---------------------------------------------------------------------------
