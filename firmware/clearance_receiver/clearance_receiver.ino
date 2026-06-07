@@ -185,8 +185,19 @@ void loop() {
 }
 
 // ============================================================================
-// 【後日】ESC + ステアリングサーボの PWM 駆動の雛形（今は未使用）
+// 【次のステップ = TODO B: モーター駆動】ESC + ステアリングサーボの PWM 駆動
 // ----------------------------------------------------------------------------
+// 設計・配線の詳細は firmware/WIRING.md を参照。要点と作業順:
+//   1. CoreS3 Grove Port A の GPIO 番号を現物確認 → ESC_PIN / STEER_PIN を確定
+//      （通常 G1=GPIO1 / G2=GPIO2。ESP32-S3 は LEDC でどのGPIOからもPWM可）
+//   2. 配線: LiPo→ESC(XT60) / LiPo→DC-DC(12V→5V)→サーボ / G1→ESC信号 G2→サーボ信号
+//      ★共通グランド必須（M5 GND と ESC/サーボ GND を必ず接続）
+//      ★ベンチテストは M5 を USB 給電にしてサーボ電源と分離（ブラウンアウト防止）
+//   3. 下の motionSetup() / applyMotion() を有効化（GAIN は控えめ ±300us から）
+//      起動時に 1500us を数秒送って ESC アーミング（ピピッ）
+//   4. ★タイヤを浮かせて★ oscSend.js で speed/steering を小さく送り回転・操舵を確認
+//   5. OK後、behavior(hesitant/frozen/random_walk/assertive) を動作パターンに反映
+//
 // CoreS3 は ESP32-S3。LEDC(PWM) でRCサーボ/ESC（50Hz, 1000〜2000us）を駆動する。
 // 配線が決まったら ESC_PIN / STEER_PIN を実ピンに設定し、applyMotion() を
 // handleMessage() の末尾から呼ぶ。
