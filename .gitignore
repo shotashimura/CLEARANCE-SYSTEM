@@ -19,6 +19,13 @@ dist-ssr
 secrets.h
 **/secrets.h
 
+# vision (Python / OpenCV)
+vision/.venv/
+vision/markers/*.png
+__pycache__/
+*.pyc
+*.npz
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
