@@ -1,13 +1,16 @@
 // CLEARANCE SYSTEM 中央サーバー
 // - OpenSky から 5 便取得 → 1 便 1 スーツケース固定割当
-// - 5 台分を並列に 3 エージェント判定 → verdict → base OSC
-// - 議論ログから対立アナウンス抽出、HISTORY 蓄積
+// - ① 判定はゆっくり、② 5台をラウンドロビンで1台ずつ判定（OpenAI 回数削減）
+// - ③ verdict はオーケストレーター LLM を使わずサーバー側でコード集約
 // - 位置 provider + 衝突回避で base OSC を補正 → 実効 OSC を UDP 送信
 // - 状態を WebSocket で各フロント（/suitcase/:id, /board, /cycle）へ配信
 //
 // 2つのループで動く:
-//   judgeLoop  (低頻度, ~10s): 判定→base OSC→アナウンス→HISTORY
+//   judgeLoop  (低頻度): 12秒ごとに「1台だけ」判定 → 各台は約60秒ごとに再判定
 //   motionLoop (高頻度, ~0.5s): 位置取得→衝突回避→OSC補正→UDP送信→配信
+//
+// OpenAI 消費: 12秒ごとに1台 × 3コール = 約15コール/分
+//   （従来 120コール/分 から約 1/8）
 import http from "node:http";
 import express from "express";
 import { WebSocketServer } from "ws";
@@ -25,13 +28,16 @@ import { createPositionProvider } from "./position/index.js";
 import { avoidCollisions } from "./collision.js";
 
 const PORT = Number(process.env.CLEARANCE_PORT ?? 8787);
-const CYCLE_GAP_MS = Number(process.env.CLEARANCE_CYCLE_GAP_MS ?? 10_000);
+// ①② 1台あたり何秒間隔で判定するか / それを5台に割った1tickの間隔
+const JUDGE_PER_SUITCASE_MS = Number(process.env.CLEARANCE_JUDGE_INTERVAL_MS ?? 60_000);
+const JUDGE_TICK_MS = Math.max(2_000, Math.round(JUDGE_PER_SUITCASE_MS / FLEET.length));
 const FLIGHT_TTL_MS = Number(process.env.CLEARANCE_FLIGHT_TTL_MS ?? 120_000);
 const MOTION_GAP_MS = Number(process.env.CLEARANCE_MOTION_GAP_MS ?? 500);
 
 const state = new ClearanceState();
 const positionProvider = createPositionProvider(process.env.CLEARANCE_POSITION ?? "mock");
 let lastFlightFetch = 0;
+let rrIndex = 0; // ラウンドロビンの現在位置
 
 // ---- HTTP (デバッグ用) + WebSocket ----
 const app = express();
@@ -74,61 +80,72 @@ async function refreshFlightsIfNeeded() {
   );
 }
 
-async function runCycle() {
-  await refreshFlightsIfNeeded();
-
-  // 5台分を並列に判定（1便1スーツケース）
-  const results = await Promise.all(
-    FLEET.map((s) => {
-      const rec = state.suitcases.get(s.suitcaseId);
-      if (!rec.flight) return Promise.resolve(null);
-      return deliberateOne(rec.flight)
-        .then((r) => ({ suitcaseId: s.suitcaseId, result: r }))
-        .catch((e) => {
-          console.error(`[deliberate] suitcase ${s.suitcaseId}:`, e.message);
-          return null;
-        });
-    })
-  );
-
-  const cycleResults = [];
-  const stamp = Date.now();
-  const historyAdds = [];
-  for (const item of results) {
-    if (!item) continue;
-    state.setVerdict(item.suitcaseId, item.result);
-    cycleResults.push(item.result);
-    const fj = item.result.verdict?.final_judgment;
-    const rec = state.suitcases.get(item.suitcaseId);
-    if (fj) {
-      historyAdds.push({
-        time: stamp,
-        suitcaseId: item.suitcaseId,
-        callsign: rec.flight?.callsign ?? rec.flight?.flight ?? "----",
-        origin: rec.flight?.origin ?? "---",
-        destination: rec.flight?.destination ?? "---",
-        permission: fj.permission,
-        alert: announcementFor(item.result),
-      });
-    }
-  }
-  state.pushHistory(historyAdds);
-  state.setAnnouncement(pickCycleAnnouncement(cycleResults));
-  state.incrementCycle();
-
-  // 判定が更新されたらすぐ一度配信（OSC 送信は motionLoop が高頻度で担当）
-  broadcast();
-  console.log(`[cycle ${state.cycle}] judged ${cycleResults.length}/5`);
+// state に保存済みの議論から、アナウンス再計算用の result 風オブジェクトを作る
+function resultsFromState() {
+  return FLEET.map((s) => {
+    const rec = state.suitcases.get(s.suitcaseId);
+    if (!rec.discussion || !rec.verdict) return null;
+    return {
+      securityText: rec.discussion.securityText,
+      flowText: rec.discussion.flowText,
+      careText: rec.discussion.careText,
+      verdict: rec.verdict,
+    };
+  }).filter(Boolean);
 }
 
-// 判定ループ（低頻度）: OpenSky取得→判定→base OSC→アナウンス
+// ②ラウンドロビン: 1 tick で「1台だけ」判定する。
+async function judgeOne() {
+  await refreshFlightsIfNeeded();
+
+  const s = FLEET[rrIndex];
+  const rec = state.suitcases.get(s.suitcaseId);
+
+  if (rec.flight) {
+    try {
+      const result = await deliberateOne(rec.flight);
+      state.setVerdict(s.suitcaseId, result);
+      const fj = result.verdict?.final_judgment;
+      if (fj) {
+        state.pushHistory([
+          {
+            time: Date.now(),
+            suitcaseId: s.suitcaseId,
+            callsign: rec.flight?.callsign ?? rec.flight?.flight ?? "----",
+            origin: rec.flight?.origin ?? "---",
+            destination: rec.flight?.destination ?? "---",
+            permission: fj.permission,
+            alert: announcementFor(result),
+          },
+        ]);
+      }
+      console.log(
+        `[judge] #${s.suitcaseId} ${s.label} → ${fj?.permission} ` +
+          `(${result.language})`
+      );
+    } catch (e) {
+      console.error(`[judge] suitcase ${s.suitcaseId}:`, e.message);
+    }
+  }
+
+  // アナウンスは全台の最新判定から再計算（対立検出）
+  state.setAnnouncement(pickCycleAnnouncement(resultsFromState()));
+
+  // ポインタを進め、一周したらサイクル数を増やす
+  rrIndex = (rrIndex + 1) % FLEET.length;
+  if (rrIndex === 0) state.incrementCycle();
+
+  broadcast();
+}
+
+// 判定ループ（低頻度）: 1 tick = 1台判定
 async function judgeLoop() {
   try {
-    await runCycle();
+    await judgeOne();
   } catch (e) {
     console.error("[judge] error:", e.message);
   }
-  setTimeout(judgeLoop, CYCLE_GAP_MS);
+  setTimeout(judgeLoop, JUDGE_TICK_MS);
 }
 
 // 運動ループ（高頻度）: 位置取得→衝突回避→OSC補正→UDP送信→配信
@@ -184,6 +201,12 @@ server.listen(PORT, () => {
   console.log(`CLEARANCE central server on http://localhost:${PORT}`);
   console.log(`  WebSocket:  ws://localhost:${PORT}`);
   console.log(`  state:      http://localhost:${PORT}/state`);
+  const callsPerMin = Math.round((60_000 / JUDGE_TICK_MS) * 3);
+  console.log(
+    `  judge: 1台/${(JUDGE_TICK_MS / 1000).toFixed(0)}s ` +
+      `(各台 約${(JUDGE_PER_SUITCASE_MS / 1000).toFixed(0)}s毎) ` +
+      `→ OpenAI 約${callsPerMin}コール/分`
+  );
   initOscPorts();
   // 判定ループと運動ループを起動
   judgeLoop();
