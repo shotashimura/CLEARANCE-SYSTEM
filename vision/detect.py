@@ -14,6 +14,8 @@
 # ※「画像内の位置 → 部屋の実座標(m)」への変換は Step 2（ホモグラフィ）で行う。
 #   ここでは検出と画面内位置までを確認する。
 import argparse
+import json
+import socket
 import time
 import sys
 
@@ -22,6 +24,28 @@ import numpy as np
 
 import config
 from aruco_compat import get_dictionary, make_detect_fn
+
+
+def make_publisher(enabled):
+    """位置を UDP/JSON で中央サーバーへ送る関数を返す。enabled=False なら何もしない。"""
+    if not enabled:
+        return lambda results: None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    addr = (config.PUBLISH_HOST, config.PUBLISH_PORT)
+    print(f"位置を送信: udp {config.PUBLISH_HOST}:{config.PUBLISH_PORT}")
+
+    def publish(results):
+        markers = [
+            {"id": r["id"], "nx": r["norm"][0], "ny": r["norm"][1], "yaw": r["yaw_deg"]}
+            for r in results
+        ]
+        payload = json.dumps({"markers": markers}).encode("utf-8")
+        try:
+            sock.sendto(payload, addr)
+        except OSError:
+            pass
+
+    return publish
 
 
 def detect_markers(frame, detect_fn):
@@ -95,9 +119,10 @@ def run_image(path):
     return results
 
 
-def run_camera():
+def run_camera(publish_enabled=False):
     dictionary = get_dictionary(config.ARUCO_DICT)
     detect_fn = make_detect_fn(dictionary)
+    publish = make_publisher(publish_enabled or config.PUBLISH)
 
     cap = cv2.VideoCapture(config.CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
@@ -119,6 +144,7 @@ def run_camera():
             print("フレーム取得失敗", file=sys.stderr)
             break
         results = detect_markers(frame, detect_fn)
+        publish(results)  # 検出位置を中央サーバーへ（有効時のみ）
 
         now = time.time()
         dt = now - last
@@ -151,9 +177,14 @@ def run_camera():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="ArUco marker detection (Step 1)")
+    ap = argparse.ArgumentParser(description="ArUco marker detection")
     ap.add_argument("--image", help="静止画で検出（カメラ無しの確認用）")
     ap.add_argument("--list", action="store_true", help="使えるカメラ番号を探す")
+    ap.add_argument(
+        "--publish",
+        action="store_true",
+        help="検出位置を UDP で中央サーバーへ送信（Step3）",
+    )
     args = ap.parse_args()
 
     if args.list:
@@ -161,7 +192,7 @@ def main():
     elif args.image:
         run_image(args.image)
     else:
-        run_camera()
+        run_camera(publish_enabled=args.publish)
 
 
 if __name__ == "__main__":

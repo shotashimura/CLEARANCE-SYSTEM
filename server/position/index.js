@@ -18,10 +18,16 @@ export const ROOM = {
 };
 
 import { createMockPositionProvider } from "./mockProvider.js";
+import { createNetworkPositionProvider } from "./networkProvider.js";
 
-// 現在採用している provider。後日 createArucoPositionProvider に差し替える。
+// provider の選択。環境変数 CLEARANCE_POSITION で切替（既定 mock）。
+//   mock           : 擬似走行（カメラ不要・開発/デモ用）
+//   aruco/network  : vision/detect.py から UDP で受け取る実カメラ位置（Step3）
 export function createPositionProvider(kind = "mock") {
   switch (kind) {
+    case "aruco":
+    case "network":
+      return createNetworkPositionProvider();
     case "mock":
     default:
       return createMockPositionProvider();

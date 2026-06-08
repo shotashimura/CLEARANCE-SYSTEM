@@ -27,3 +27,10 @@ PRINT_DPI = 300
 # レンズ歪み補正・実寸pose推定に使う。無ければ None（検出は動く／pose精度は粗い）。
 # 本番 BRIO では広角の歪みが大きいので、別途キャリブして "calib_brio.npz" などに差し替える。
 CALIBRATION_FILE = None
+
+# --- 中央サーバーへの位置送信（Step3） ------------------------------------
+# 検出した各マーカーの位置を UDP/JSON で中央サーバーへ送る。
+# サーバー側は CLEARANCE_POSITION=aruco で起動すると 8788 で受信する。
+PUBLISH = False             # True で送信（--publish でも有効化可）
+PUBLISH_HOST = "127.0.0.1"  # 中央サーバーのホスト（同一PCなら 127.0.0.1）
+PUBLISH_PORT = 8788

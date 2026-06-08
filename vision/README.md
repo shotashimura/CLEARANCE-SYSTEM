@@ -48,6 +48,28 @@ python detect.py
   python detect.py --image markers/marker_1.png
   ```
 
+### 4) 中央サーバーへ位置を送って衝突回避を動かす（Step 3）
+2つのターミナルで：
+
+```bash
+# ターミナル1: 中央サーバーを aruco モードで起動（UDP 8788 で位置受信）
+cd ..
+CLEARANCE_POSITION=aruco npm run dev
+
+# ターミナル2: 検出 + 位置を送信
+cd vision && source .venv/bin/activate
+python detect.py --publish
+```
+
+→ カメラでマーカーを動かすと、ブラウザの `/board`・`/cycle` の **SAFETY 列**が
+`CLEAR → SLOW → DIVERT → STOP` と変化する（マーカー同士を近づける／端へ寄せると反応）。
+これが「**検出 → 衝突回避 → OSC補正**」がソフトで一気通貫する確認。
+
+> 送信先は `config.py` の `PUBLISH_HOST` / `PUBLISH_PORT`（既定 127.0.0.1:8788）。
+> 送る JSON: `{"markers":[{"id":1,"nx":0.5,"ny":0.4,"yaw":12.3}, ...]}`
+> サーバー側は `server/position/networkProvider.js` が受信し、nx,ny を部屋座標(8×5m)へ
+> 簡易マッピング（本番は天井カメラ＋ホモグラフィに差し替え＝Step 2）。
+
 ## 出力する位置の意味
 - `px` … 画像内のピクセル座標（左上原点）
 - `norm` … 0〜1 に正規化（カメラ解像度に依らない）
