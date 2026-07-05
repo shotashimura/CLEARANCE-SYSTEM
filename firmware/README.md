@@ -23,11 +23,21 @@
 
 ## 2. スケッチの設定
 
-`firmware/clearance_receiver/clearance_receiver.ino` を開き、先頭を編集:
+**WiFi 認証情報**は `.ino` に直接書かず、`firmware/clearance_receiver/` に
+`secrets.h` を作成して記入する（`.gitignore` 済み・コミットされない）:
 
 ```cpp
-const char* WIFI_SSID = "YOUR_WIFI_SSID";      // WiFi 名
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";  // パスワード
+// firmware/clearance_receiver/secrets.h
+#define WIFI_SSID "あなたのWiFi名"
+#define WIFI_PASS "あなたのパスワード"
+```
+
+> `secrets.h` が無い場合はプレースホルダ（`YOUR_WIFI_SSID`）にフォールバック
+> するだけで、そのままでは接続できない。
+
+**機体ごとの設定**は `clearance_receiver.ino` の先頭を編集:
+
+```cpp
 const int   SUITCASE_ID = 1;                   // この機体の番号 (1..5)
 const uint16_t OSC_PORT = 8000;                // 既定 8000（変えなくてよい）
 ```
